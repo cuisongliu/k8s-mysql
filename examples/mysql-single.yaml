@@ -1,0 +1,155 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kube-crd
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: mysql-passwd
+  namespace: kube-crd
+data:
+  password: YWRtaW4=
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mysql-config
+  namespace: kube-crd
+data:
+  mysql_other.cnf: |
+    [mysqld]
+    default_storage_engine=innodb
+    skip_external_locking
+    lower_case_table_names=1
+    skip_host_cache
+    skip_name_resolve
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mysql-config-db
+  namespace: kube-crd
+data:
+  mysql.username: admin
+  mysql.database: cuisongliu
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mysql
+  namespace: kube-crd
+spec:
+  ports:
+  - name: mysql
+    port: 3306
+    targetPort: 3306
+  clusterIP: None
+  selector:
+    app: mysql
+---
+
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  namespace: kube-crd
+  name: mysql
+spec:
+  selector:
+    matchLabels:
+      app: mysql
+  serviceName: "mysql"
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        app: mysql
+    spec:
+      initContainers:
+      - name: mysql-init
+        image: busybox:1.29
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: MYSQL_ROOT_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: mysql-passwd
+              key: password
+        - name: MYSQL_USERNAME
+          valueFrom:
+            configMapKeyRef:
+              name: mysql-config-db
+              key: mysql.username
+        - name: MYSQL_DATABASE
+          valueFrom:
+            configMapKeyRef:
+              name: mysql-config-db
+              key: mysql.database
+        command:
+        - sh
+        - "-c"
+        - |
+          set -ex
+          rm -rf /var/lib/mysql/lost+found
+          cat > /docker-entrypoint-initdb.d/mysql-db-initt.sql <<EOF
+          create database $MYSQL_DATABASE default character set utf8;
+          grant all on $MYSQL_DATABASE.* to '$MYSQL_USERNAME'@'%' identified by '$MYSQL_ROOT_PASSWORD';
+          flush privileges;
+          EOF
+          cat > /docker-entrypoint-initdb.d/mysql-db-init.sql <<EOF
+          commit;
+          EOF
+        volumeMounts:
+        - name: mysql-data
+          mountPath: /var/lib/mysql
+        - name: mysql-initdb
+          mountPath: /docker-entrypoint-initdb.d
+      containers:
+      - name: mysql
+        image: mysql:8
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 3306
+        env:
+        - name: MYSQL_ROOT_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              key: password
+              name: mysql-passwd
+        livenessProbe:
+          exec:
+            command:
+            - /bin/sh
+            - "-c"
+            - mysql -h 127.0.0.1 -uroot -p$MYSQL_ROOT_PASSWORD -e "SELECT 1"
+          initialDelaySeconds: 30
+          timeoutSeconds: 5
+          successThreshold: 1
+          failureThreshold: 3
+        readinessProbe:
+          exec:
+            command:
+            - /bin/sh
+            - "-c"
+            - mysql -h 127.0.0.1 -uroot -p$MYSQL_ROOT_PASSWORD -e "SELECT 1"
+          initialDelaySeconds: 10
+          timeoutSeconds: 1
+          successThreshold: 1
+          failureThreshold: 3
+        volumeMounts:
+        - name: mysql-data
+          mountPath: /var/lib/mysql
+        - name: mysql-initdb
+          mountPath: /docker-entrypoint-initdb.d
+        - name: mysql-config
+          mountPath: /etc/mysql/conf.d/
+      volumes:
+      - name:  mysql-data
+        hostPath:
+          path: /var/lib/mysql
+      - name: mysql-initdb
+        emptyDir: {}
+      - name: mysql-config
+        configMap:
+          name: mysql-config
